@@ -57,7 +57,7 @@ function App() {
         console.log('Detection cancelled');
       } else {
         console.error(err);
-        setError("Failed to process page. Backend might be offline or Tesseract missing.");
+        setError("Failed to process page. Please check if the backend server is running and try again.");
       }
     } finally {
       if (abortControllerRef.current && !abortControllerRef.current.signal.aborted) {

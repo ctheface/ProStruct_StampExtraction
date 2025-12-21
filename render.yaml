@@ -4,7 +4,7 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: OCR_SPACE_API_KEY
-        sync: false  # Set this manually in Render dashboard
-
+    # Environment variables should be set manually in Render dashboard:
+    # Go to: Your Service → Environment → Add Environment Variable
+    # Key: OCR_SPACE_API_KEY
+    # Value: your_actual_api_key_here
