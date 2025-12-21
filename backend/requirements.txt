@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+pymupdf
+numpy
+opencv-python-headless
+pillow
+requests
+python-dotenv
