@@ -1,28 +1,132 @@
-# Dependencies
-node_modules/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 venv/
 .venv/
 env/
-__pycache__/
-*.pyc
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Node.js / Frontend
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.npm
+.eslintcache
+.parcel-cache
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.vercel
+*.tsbuildinfo
 
 # Environment & Secrets
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 *.local
 gemini_key.txt
 google_key.json
-google_key.json
+*-credentials.json
+*credentials*.json
 
-# IDE / OS
+# Temporary uploads & files
+temp_uploads/
+backend/temp_uploads/
+*.pdf
+!README.pdf
+*.tmp
+*.temp
+*.log
+
+# IDE / Editor
 .vscode/
 .idea/
-.DS_Store
-Thumbs.db
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
 
-# Build / Temp
-dist/
-build/
-temp_uploads/
-out/
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Testing & Coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.hypothesis/
+*.cover
+*.py,cover
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# Render
+.render/
+
+# Vercel
 .vercel
-.next/
+vercel.json.bak
+
+# Local development
+*.local
+local/

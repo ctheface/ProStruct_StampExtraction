@@ -132,6 +132,37 @@ function App() {
     };
   };
 
+  // Calculate Search Region Overlay Style
+  const getSearchRegionStyle = () => {
+    if (!results || imgDimensions.naturalWidth === 0) return { display: 'none' };
+
+    // Get search region from results (could be single object or array)
+    let searchRegion = null;
+    if (!Array.isArray(results) && results.search_region) {
+      searchRegion = results.search_region;
+    } else if (Array.isArray(results) && results.length > 0 && results[0].search_region) {
+      searchRegion = results[0].search_region;
+    }
+
+    if (!searchRegion) return { display: 'none' };
+
+    const [x, y, w, h] = searchRegion;
+    const scaleX = imgDimensions.width / imgDimensions.naturalWidth;
+    const scaleY = imgDimensions.height / imgDimensions.naturalHeight;
+
+    return {
+      left: `${x * scaleX}px`,
+      top: `${y * scaleY}px`,
+      width: `${w * scaleX}px`,
+      height: `${h * scaleY}px`,
+      position: 'absolute',
+      border: `2px dashed #6366f1`, // Indigo dashed border
+      backgroundColor: 'rgba(99, 102, 241, 0.1)', // Light indigo background
+      zIndex: 5, // Below stamp boxes but visible
+      pointerEvents: 'none'
+    };
+  };
+
 
   return (
     <div className="min-h-screen bg-gray-100 p-8 text-slate-800">
@@ -164,10 +195,10 @@ function App() {
 
         {/* WORKSPACE */}
         {fileId && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          <div className="space-y-6">
 
-            {/* LEFT COLUMN: VIEWER */}
-            <div className="lg:col-span-2 space-y-4">
+            {/* VIEWER SECTION */}
+            <div className="space-y-4">
               {/* Toolbar */}
               <div className="flex items-center justify-between bg-white p-4 rounded-lg shadow">
                 <div className="flex items-center space-x-4">
@@ -232,7 +263,7 @@ function App() {
               </div>
 
               {/* Image Canvas */}
-              <div className="relative bg-white p-2 rounded-lg shadow overflow-hidden flex justify-center border border-gray-200" style={{ minHeight: '600px' }}>
+              <div className="relative bg-white p-2 rounded-lg shadow overflow-hidden flex justify-center border border-gray-200" style={{ minHeight: '500px' }}>
                 <div className="relative inline-block">
                   <img
                     ref={imgRef}
@@ -240,47 +271,55 @@ function App() {
                     alt={`Page ${currentPage + 1}`}
                     onLoad={onImgLoad}
                     className="max-w-full h-auto shadow-sm"
-                    style={{ maxHeight: '80vh' }}
+                    style={{ maxHeight: '70vh' }}
                   />
-                  {/* Bounding Box Overlay - handles both single and multi-stamp */}
-                  {results && results.bounding_box && (
+                  {/* Search Region Overlay - shows where OCR search is performed */}
+                  {results && (
+                    <div 
+                      style={getSearchRegionStyle()} 
+                      title="OCR Search Region (Right 40%, Top 70%)"
+                    />
+                  )}
+                  {/* Bounding Box Overlay - handles both single and array response */}
+                  {results && !Array.isArray(results) && results.bounding_box && (
                     <div style={getBoxStyle(results, 0)} title={`Detected: ${results.engineer_name}`} />
                   )}
-                  {results && results.stamps && results.stamps.map((stamp, idx) => (
+                  {results && Array.isArray(results) && results.map((stamp, idx) => (
                     <div key={idx} style={getBoxStyle(stamp, idx)} title={`Stamp ${idx + 1}: ${stamp.engineer_name}`} />
                   ))}
                 </div>
               </div>
             </div>
 
-            {/* RIGHT COLUMN: RESULTS */}
-            <div className="space-y-4">
-              <div className="bg-white p-6 rounded-lg shadow h-full max-h-[85vh] overflow-y-auto">
-                <h2 className="text-xl font-bold mb-4 border-b pb-2">Extraction Results</h2>
+            {/* EXTRACTION RESULTS SECTION - Below the PDF */}
+            <div className="bg-white p-6 rounded-lg shadow">
+              <h2 className="text-xl font-bold mb-4 border-b pb-2">Extraction Results</h2>
 
-                {!results && !processing && (
-                  <p className="text-gray-400 italic">Click "Detect Stamp" to analyze this page.</p>
-                )}
+              {!results && !processing && (
+                <p className="text-gray-400 italic">Click "Detect Stamp" to analyze this page.</p>
+              )}
 
-                {processing && (
-                  <div className="flex items-center space-x-2 text-blue-600">
-                    <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
-                    </svg>
-                    <span>Analyzing layout and OCR...</span>
-                  </div>
-                )}
+              {processing && (
+                <div className="flex items-center space-x-2 text-blue-600">
+                  <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                  </svg>
+                  <span>Analyzing layout and OCR...</span>
+                </div>
+              )}
 
-                {/* Single stamp result */}
-                {results && results.bounding_box && !results.stamps && (
-                  <div className="space-y-4">
+              {/* Single stamp result */}
+              {results && !Array.isArray(results) && results.bounding_box && (
+                <div className="space-y-6">
+                  {/* Stamp card */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     <div className="border-2 border-red-400 rounded-lg p-4 space-y-3">
                       <div className="flex items-center gap-2 mb-2">
                         <div className="w-4 h-4 rounded bg-red-500"></div>
                         <h3 className="font-bold">Detected Stamp</h3>
                       </div>
-                      <div className="grid grid-cols-2 gap-3 text-sm">
+                      <div className="space-y-2 text-sm">
                         <div>
                           <label className="text-xs text-gray-500 uppercase">Engineer</label>
                           <div className="font-medium text-lg">{results.engineer_name || "Unknown"}</div>
@@ -295,22 +334,26 @@ function App() {
                         <img src={getCroppedImageUrl(fileId, currentPage, results.bounding_box)} alt="Stamp" className="max-w-full h-auto rounded border" />
                       </div>
                     </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-500 uppercase mb-2">JSON Output</label>
-                      <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-lg overflow-x-auto font-mono max-h-32">
-                        {JSON.stringify({ page: results.page, symbol_type: "approval_stamp", bounding_box: results.bounding_box, engineer_name: results.engineer_name, license_number: results.license_number, units: "pixels" }, null, 2)}
-                      </pre>
-                    </div>
                   </div>
-                )}
+                  {/* JSON Output */}
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 uppercase mb-2">JSON Output</label>
+                    <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-lg overflow-x-auto font-mono">
+                      {JSON.stringify({ page: results.page, symbol_type: "approval_stamp", bounding_box: results.bounding_box, engineer_name: results.engineer_name, license_number: results.license_number, units: "pixels" }, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              )}
 
-                {/* Multiple stamps result */}
-                {results && results.stamps && (
-                  <div className="space-y-4">
-                    <div className="p-2 bg-blue-50 text-blue-800 text-sm rounded-lg border border-blue-200">
-                      <strong>📋 Found {results.stamp_count} stamps</strong>
-                    </div>
-                    {results.stamps.map((stamp, idx) => {
+              {/* Multiple stamps result */}
+              {results && Array.isArray(results) && (
+                <div className="space-y-6">
+                  <div className="p-2 bg-blue-50 text-blue-800 text-sm rounded-lg border border-blue-200">
+                    <strong>📋 Found {results.length} stamps</strong>
+                  </div>
+                  {/* Stamps grid - side by side */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                    {results.map((stamp, idx) => {
                       const color = boxColors[idx % boxColors.length];
                       return (
                         <div key={idx} className="border-2 rounded-lg p-4 space-y-3" style={{ borderColor: color.border }}>
@@ -318,7 +361,7 @@ function App() {
                             <div className="w-4 h-4 rounded" style={{ backgroundColor: color.border }}></div>
                             <h3 className="font-bold">Stamp {idx + 1}</h3>
                           </div>
-                          <div className="grid grid-cols-2 gap-3 text-sm">
+                          <div className="space-y-2 text-sm">
                             <div>
                               <label className="text-xs text-gray-500 uppercase">Engineer</label>
                               <div className="font-medium">{stamp.engineer_name || "Unknown"}</div>
@@ -335,28 +378,30 @@ function App() {
                         </div>
                       );
                     })}
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-500 uppercase mb-2">JSON Output</label>
-                      <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-lg overflow-x-auto font-mono max-h-32">
-                        {JSON.stringify(results, null, 2)}
-                      </pre>
-                    </div>
                   </div>
-                )}
-                {error && (
-                  <div className="mt-4 p-3 bg-red-50 text-red-700 rounded border border-red-200 text-sm">
-                    {error}
+                  {/* JSON Output */}
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 uppercase mb-2">JSON Output</label>
+                    <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-lg overflow-x-auto font-mono">
+                      {JSON.stringify(results, null, 2)}
+                    </pre>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
-              <button
-                onClick={() => setFileId(null)}
-                className="text-gray-500 hover:text-gray-700 text-sm w-full text-center mt-4"
-              >
-                Upload a different PDF
-              </button>
+              {error && (
+                <div className="mt-4 p-3 bg-red-50 text-red-700 rounded border border-red-200 text-sm">
+                  {error}
+                </div>
+              )}
             </div>
+
+            <button
+              onClick={() => setFileId(null)}
+              className="text-gray-500 hover:text-gray-700 text-sm w-full text-center"
+            >
+              Upload a different PDF
+            </button>
           </div>
         )}
       </div>
