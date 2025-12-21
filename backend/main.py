@@ -37,7 +37,7 @@ app.add_middleware(
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-RENDER_DPI = 150  # Reduced from 300 for Render free tier compatibility
+RENDER_DPI = 100  # Reduced to 100 DPI for Render free tier (512MB limit) - still sufficient for OCR
 RENDER_SCALE = RENDER_DPI / 72
 
 # OCR.space API configuration
@@ -87,18 +87,40 @@ async def upload_pdf(file: UploadFile = File(...)):
 @app.get("/page/{file_id}/{page_index}")
 async def get_page_image(file_id: str, page_index: int):
     """Return page as high-resolution image."""
-    file_path = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    doc = fitz.open(file_path)
-    if page_index >= doc.page_count:
-        raise HTTPException(status_code=400, detail="Page index out of range")
-    
-    pix = doc[page_index].get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
-    img_data = pix.tobytes("png")
-    doc.close()
-    return Response(content=img_data, media_type="image/png")
+    try:
+        file_path = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        doc = fitz.open(file_path)
+        if page_index >= doc.page_count:
+            doc.close()
+            raise HTTPException(status_code=400, detail="Page index out of range")
+        
+        pix = doc[page_index].get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
+        img_data = pix.tobytes("png")
+        # Free pixmap immediately to save memory
+        del pix
+        doc.close()
+        
+        # Compress if image is too large (>3MB to stay under 512MB limit)
+        img_size_mb = len(img_data) / (1024 * 1024)
+        if img_size_mb > 3:
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(img_data))
+            output = io.BytesIO()
+            # Compress PNG
+            img.save(output, format='PNG', optimize=True, compress_level=9)
+            img_data = output.getvalue()
+            del img, output
+        
+        return Response(content=img_data, media_type="image/png")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[PAGE ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to render page: {str(e)}")
 
 
 @app.get("/crop/{file_id}/{page_index}")
@@ -145,6 +167,8 @@ async def process_page(req: ProcessRequest):
         pix = doc[req.page_index].get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
         img_bytes = pix.tobytes("png")
         img_width, img_height = pix.width, pix.height
+        # Free pixmap memory immediately
+        pix = None
         doc.close()
         
         # Calculate search region: right 40% of page, top 70% of that region
@@ -153,7 +177,7 @@ async def process_page(req: ProcessRequest):
         search_region_w = img_width - search_region_x
         search_region_h = int(img_height * 0.70)
         
-        # Detect stamps
+        # Detect stamps (pass bytes directly to avoid extra copy)
         stamps = detect_stamp_regions(img_bytes)
         if not stamps:
             # Fallback: use center of search region
@@ -163,18 +187,26 @@ async def process_page(req: ProcessRequest):
             fallback_h = int(search_region_h * 0.6)
             stamps = [(fallback_x, fallback_y, fallback_w, fallback_h, 0, True)]
         
-        # Process
+        # Process - decode image once
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # Free original bytes immediately after decoding to save memory
+        del img_bytes, nparr
+        import gc
+        gc.collect()  # Force garbage collection
         
         results = []
         for x, y, w, h, score, is_circular in stamps:
             x, y, w, h = int(x), int(y), int(w), int(h)
-            cropped = img[y:y+h, x:x+w]
+            cropped = img[y:y+h, x:x+w].copy()  # Explicit copy
             if cropped.size == 0:
                 continue
             
+            # Process OCR
             ocr_text = perform_ocr(cropped, is_circular)
+            # Free cropped image immediately after OCR to save memory
+            del cropped
+            
             license_number = extract_license_number(ocr_text)
             engineer_name = extract_engineer_name(ocr_text, license_number)
             
@@ -186,6 +218,11 @@ async def process_page(req: ProcessRequest):
                 "license_number": license_number,
                 "units": "pixels"
             })
+        
+        # Free main image after processing all stamps
+        del img
+        import gc
+        gc.collect()  # Force garbage collection
         
         # Return single object if one stamp, array if multiple (for backward compatibility)
         # Include search_region in response for overlay display (but not in JSON output)
@@ -244,11 +281,16 @@ def detect_stamp_regions(page_image_bytes):
     zone_y = 0
     zone_height = int(h * 0.70)
     
-    zone = img[zone_y:zone_y+zone_height, zone_x:zone_x+zone_width]
+    zone = img[zone_y:zone_y+zone_height, zone_x:zone_x+zone_width].copy()
     zone_h, zone_w = zone.shape[:2]
+    # Free full image immediately after extracting zone
+    del img
+    import gc
+    gc.collect()
     
     # Convert to grayscale and preprocess
     gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+    del zone  # Free zone after converting to grayscale
     gray = cv2.GaussianBlur(gray, (5, 5), 1)
     
     # Use Canny edge detection
@@ -257,6 +299,7 @@ def detect_stamp_regions(page_image_bytes):
     # Dilate to connect broken edges
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     edges = cv2.dilate(edges, kernel, iterations=2)
+    # Note: Keep gray for circle detection - will delete after loop
     
     # Find contours
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -418,6 +461,11 @@ def detect_stamp_regions(page_image_bytes):
         candidates.append((x, y, bw, bh, score, True))
         print(f"[DETECTION] Found candidate: pos=({x},{y}), size={bw}x{bh}, circularity={circularity:.2f}, fill={fill_ratio:.2f}, score={score:.1f}")
     
+    # Free gray and edges after processing all candidates
+    del gray, edges
+    import gc
+    gc.collect()
+    
     # Sort by score descending
     candidates.sort(key=lambda x: x[4], reverse=True)
     
@@ -467,12 +515,12 @@ def filter_overlapping_stamps(candidates):
 
 
 def preprocess_for_ocr(crop_img, is_circular=False):
-    """Preprocess image for OCR: upscale and enhance contrast."""
+    """Preprocess image for OCR: optimize for memory efficiency."""
     h, w = crop_img.shape[:2]
     
-    # Upscale for better OCR accuracy
-    if w < 800:
-        scale = 800 / w
+    # Limit upscaling to prevent memory issues (max 500px width instead of 800)
+    if w < 500:
+        scale = min(500 / w, 2.0)  # Cap scale at 2x to prevent huge images
         crop_img = cv2.resize(crop_img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         h, w = crop_img.shape[:2]
     
@@ -484,11 +532,14 @@ def preprocess_for_ocr(crop_img, is_circular=False):
         # Grayscale to RGB
         crop_img = cv2.cvtColor(crop_img, cv2.COLOR_GRAY2RGB)
     
-    # Enhance contrast
+    # Enhance contrast (memory-efficient)
     gray = cv2.cvtColor(crop_img, cv2.COLOR_RGB2GRAY) if len(crop_img.shape) == 3 else crop_img
     denoised = cv2.bilateralFilter(gray, 9, 75, 75)
     enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(denoised)
     enhanced_rgb = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)
+    
+    # Free intermediate arrays to save memory
+    del gray, denoised, enhanced
     
     return enhanced_rgb
 
@@ -501,6 +552,10 @@ def perform_ocr(crop_img, is_circular=False):
     # Encode image to base64
     _, buffer = cv2.imencode('.png', processed_img)
     img_base64 = base64.b64encode(buffer).decode('utf-8')
+    # Free processed image and buffer immediately to save memory
+    del processed_img, buffer
+    import gc
+    gc.collect()
     
     # Prepare API request
     payload = {
@@ -512,6 +567,8 @@ def perform_ocr(crop_img, is_circular=False):
         'scale': True,
         'OCREngine': 2,  # Engine 2 is more accurate for printed text
     }
+    # Free base64 string after creating payload (it's copied into payload)
+    del img_base64
     
     try:
         # Make API request (reduced timeout for Render free tier)

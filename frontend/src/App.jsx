@@ -9,6 +9,8 @@ function App() {
   const [processing, setProcessing] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
+  const [imageError, setImageError] = useState(null);
+  const [imageLoading, setImageLoading] = useState(false);
 
   const imgRef = useRef(null);
   const abortControllerRef = useRef(null);
@@ -26,6 +28,8 @@ function App() {
       setPageCount(data.page_count);
       setCurrentPage(0);
       setResults(null);
+      setImageLoading(true);
+      setImageError(null);
     } catch (err) {
       console.error(err);
       setError("Failed to upload PDF");
@@ -37,6 +41,8 @@ function App() {
   const handlePageChange = (newPage) => {
     setCurrentPage(newPage);
     setResults(null); // Reset results on page change
+    setImageError(null);
+    setImageLoading(true);
   };
 
   const runExtraction = async () => {
@@ -76,12 +82,20 @@ function App() {
 
   // Update image dimensions for scaling the bounding box
   const onImgLoad = (e) => {
+    setImageLoading(false);
+    setImageError(null);
     setImgDimensions({
       width: e.target.offsetWidth,
       height: e.target.offsetHeight,
       naturalWidth: e.target.naturalWidth,
       naturalHeight: e.target.naturalHeight,
     });
+  };
+
+  const onImgError = (e) => {
+    setImageLoading(false);
+    setImageError("Failed to load page image. Please check if the backend server is running.");
+    console.error("Image load error:", e);
   };
 
   // Recalculate on window resize
@@ -264,15 +278,27 @@ function App() {
 
               {/* Image Canvas */}
               <div className="relative bg-white p-2 rounded-lg shadow overflow-hidden flex justify-center border border-gray-200" style={{ minHeight: '500px' }}>
-                <div className="relative inline-block">
-                  <img
-                    ref={imgRef}
-                    src={getPageImageUrl(fileId, currentPage)}
-                    alt={`Page ${currentPage + 1}`}
-                    onLoad={onImgLoad}
-                    className="max-w-full h-auto shadow-sm"
-                    style={{ maxHeight: '70vh' }}
-                  />
+                {imageLoading && (
+                  <div className="flex items-center justify-center h-full">
+                    <div className="text-gray-500">Loading page image...</div>
+                  </div>
+                )}
+                {imageError && (
+                  <div className="flex items-center justify-center h-full">
+                    <div className="text-red-500 bg-red-50 p-4 rounded">{imageError}</div>
+                  </div>
+                )}
+                {!imageError && (
+                  <div className="relative inline-block">
+                    <img
+                      ref={imgRef}
+                      src={getPageImageUrl(fileId, currentPage)}
+                      alt={`Page ${currentPage + 1}`}
+                      onLoad={onImgLoad}
+                      onError={onImgError}
+                      className="max-w-full h-auto shadow-sm"
+                      style={{ maxHeight: '70vh', display: imageLoading ? 'none' : 'block' }}
+                    />
                   {/* Search Region Overlay - shows where OCR search is performed */}
                   {results && (
                     <div 
@@ -287,7 +313,8 @@ function App() {
                   {results && Array.isArray(results) && results.map((stamp, idx) => (
                     <div key={idx} style={getBoxStyle(stamp, idx)} title={`Stamp ${idx + 1}: ${stamp.engineer_name}`} />
                   ))}
-                </div>
+                  </div>
+                )}
               </div>
             </div>
 
