@@ -55,11 +55,15 @@ class ProcessRequest(BaseModel):
 @app.get("/")
 async def root():
     """Health check endpoint."""
-    return {
-        "status": "ok",
-        "message": "ProStruct Stamp Extractor API is running",
-        "version": "1.0.0"
-    }
+    return Response(
+        content='{"status":"ok","message":"ProStruct Stamp Extractor API is running","version":"1.0.0"}',
+        media_type="application/json",
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 
 @app.post("/upload")
