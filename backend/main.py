@@ -26,10 +26,12 @@ app = FastAPI(title="ProStruct Stamp Extractor")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=False,  # Must be False when using allow_origins=["*"]
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 UPLOAD_DIR = "temp_uploads"
@@ -49,6 +51,16 @@ class ProcessRequest(BaseModel):
 
 
 # === Endpoints ===
+
+@app.get("/")
+async def root():
+    """Health check endpoint."""
+    return {
+        "status": "ok",
+        "message": "ProStruct Stamp Extractor API is running",
+        "version": "1.0.0"
+    }
+
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
