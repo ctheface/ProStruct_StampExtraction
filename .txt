@@ -1,0 +1,5 @@
+cd backend
+./venv/Scripts/python.exe main.py
+
+cd frontend
+npm run dev

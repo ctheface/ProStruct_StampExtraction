@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Environment & Secrets
+.env
+*.local
+gemini_key.txt
+google_key.json
+google_key.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build / Temp
+dist/
+build/
+temp_uploads/
+out/
+.vercel
+.next/
