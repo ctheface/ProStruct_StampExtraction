@@ -37,7 +37,7 @@ app.add_middleware(
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-RENDER_DPI = 300
+RENDER_DPI = 150  # Reduced from 300 for Render free tier compatibility
 RENDER_SCALE = RENDER_DPI / 72
 
 # OCR.space API configuration
@@ -132,84 +132,96 @@ async def get_cropped_stamp(file_id: str, page_index: int,
 @app.post("/process")
 async def process_page(req: ProcessRequest):
     """Main endpoint: detect stamps and extract engineer info."""
-    file_path = os.path.join(UPLOAD_DIR, f"{req.filename}.pdf")
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    doc = fitz.open(file_path)
-    if req.page_index >= doc.page_count:
+    try:
+        file_path = os.path.join(UPLOAD_DIR, f"{req.filename}.pdf")
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        doc = fitz.open(file_path)
+        if req.page_index >= doc.page_count:
+            doc.close()
+            raise HTTPException(status_code=400, detail="Page index out of range")
+        
+        pix = doc[req.page_index].get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
+        img_bytes = pix.tobytes("png")
+        img_width, img_height = pix.width, pix.height
         doc.close()
-        raise HTTPException(status_code=400, detail="Page index out of range")
-    
-    pix = doc[req.page_index].get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
-    img_bytes = pix.tobytes("png")
-    img_width, img_height = pix.width, pix.height
-    doc.close()
-    
-    # Calculate search region: right 40% of page, top 70% of that region
-    search_region_x = int(img_width * 0.60)
-    search_region_y = 0
-    search_region_w = img_width - search_region_x
-    search_region_h = int(img_height * 0.70)
-    
-    # Detect stamps
-    stamps = detect_stamp_regions(img_bytes)
-    if not stamps:
-        # Fallback: use center of search region
-        fallback_x = search_region_x + int(search_region_w * 0.2)
-        fallback_y = search_region_y + int(search_region_h * 0.2)
-        fallback_w = int(search_region_w * 0.6)
-        fallback_h = int(search_region_h * 0.6)
-        stamps = [(fallback_x, fallback_y, fallback_w, fallback_h, 0, True)]
-    
-    # Process
-    nparr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
-    results = []
-    for x, y, w, h, score, is_circular in stamps:
-        x, y, w, h = int(x), int(y), int(w), int(h)
-        cropped = img[y:y+h, x:x+w]
-        if cropped.size == 0:
-            continue
         
-        ocr_text = perform_ocr(cropped, is_circular)
-        license_number = extract_license_number(ocr_text)
-        engineer_name = extract_engineer_name(ocr_text, license_number)
+        # Calculate search region: right 40% of page, top 70% of that region
+        search_region_x = int(img_width * 0.60)
+        search_region_y = 0
+        search_region_w = img_width - search_region_x
+        search_region_h = int(img_height * 0.70)
         
-        results.append({
-            "page": req.page_index + 1,
-            "symbol_type": "approval_stamp",
-            "bounding_box": [x, y, w, h],
-            "engineer_name": engineer_name,
-            "license_number": license_number,
-            "units": "pixels"
-        })
-    
-    # Return single object if one stamp, array if multiple (for backward compatibility)
-    # Include search_region in response for overlay display (but not in JSON output)
-    if len(results) == 1:
-        result = results[0]
-        result["search_region"] = [search_region_x, search_region_y, search_region_w, search_region_h]
+        # Detect stamps
+        stamps = detect_stamp_regions(img_bytes)
+        if not stamps:
+            # Fallback: use center of search region
+            fallback_x = search_region_x + int(search_region_w * 0.2)
+            fallback_y = search_region_y + int(search_region_h * 0.2)
+            fallback_w = int(search_region_w * 0.6)
+            fallback_h = int(search_region_h * 0.6)
+            stamps = [(fallback_x, fallback_y, fallback_w, fallback_h, 0, True)]
+        
+        # Process
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        results = []
+        for x, y, w, h, score, is_circular in stamps:
+            x, y, w, h = int(x), int(y), int(w), int(h)
+            cropped = img[y:y+h, x:x+w]
+            if cropped.size == 0:
+                continue
+            
+            ocr_text = perform_ocr(cropped, is_circular)
+            license_number = extract_license_number(ocr_text)
+            engineer_name = extract_engineer_name(ocr_text, license_number)
+            
+            results.append({
+                "page": req.page_index + 1,
+                "symbol_type": "approval_stamp",
+                "bounding_box": [x, y, w, h],
+                "engineer_name": engineer_name,
+                "license_number": license_number,
+                "units": "pixels"
+            })
+        
+        # Return single object if one stamp, array if multiple (for backward compatibility)
+        # Include search_region in response for overlay display (but not in JSON output)
+        if len(results) == 1:
+            result = results[0]
+            result["search_region"] = [search_region_x, search_region_y, search_region_w, search_region_h]
+            # Print JSON output to terminal (without search_region)
+            json_output = {k: v for k, v in result.items() if k != "search_region"}
+            print("\n" + "="*80)
+            print("JSON OUTPUT:")
+            print("="*80)
+            print(json.dumps(json_output, indent=2))
+            print("="*80 + "\n")
+            return result
+        # For multiple stamps, return array but also include search_region in each
+        for result in results:
+            result["search_region"] = [search_region_x, search_region_y, search_region_w, search_region_h]
         # Print JSON output to terminal (without search_region)
-        json_output = {k: v for k, v in result.items() if k != "search_region"}
+        json_output = [{k: v for k, v in r.items() if k != "search_region"} for r in results]
         print("\n" + "="*80)
         print("JSON OUTPUT:")
         print("="*80)
         print(json.dumps(json_output, indent=2))
         print("="*80 + "\n")
-        return result
-    # For multiple stamps, return array but also include search_region in each
-    for result in results:
-        result["search_region"] = [search_region_x, search_region_y, search_region_w, search_region_h]
-    # Print JSON output to terminal (without search_region)
-    json_output = [{k: v for k, v in r.items() if k != "search_region"} for r in results]
-    print("\n" + "="*80)
-    print("JSON OUTPUT:")
-    print("="*80)
-    print(json.dumps(json_output, indent=2))
-    print("="*80 + "\n")
-    return results
+        return results
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is (they already have proper status codes)
+        raise
+    except Exception as e:
+        # Catch all other exceptions to prevent 502 errors on Render
+        # This ensures proper HTTP response with CORS headers instead of worker crash
+        print(f"[PROCESS ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
 # === Detection & OCR Functions ===
@@ -502,8 +514,8 @@ def perform_ocr(crop_img, is_circular=False):
     }
     
     try:
-        # Make API request
-        response = requests.post(OCR_SPACE_API_URL, data=payload, timeout=30)
+        # Make API request (reduced timeout for Render free tier)
+        response = requests.post(OCR_SPACE_API_URL, data=payload, timeout=20)
         response.raise_for_status()
         
         result = response.json()
