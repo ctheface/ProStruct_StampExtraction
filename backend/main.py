@@ -26,10 +26,10 @@ app = FastAPI(title="ProStruct Stamp Extractor")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
-    allow_credentials=False,  # Must be False when using allow_origins=["*"]
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["*"],
     max_age=3600,
 )
@@ -37,11 +37,11 @@ app.add_middleware(
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-RENDER_DPI = 100  # Reduced to 100 DPI for Render free tier (512MB limit) - still sufficient for OCR
+RENDER_DPI = 150
 RENDER_SCALE = RENDER_DPI / 72
 
 # OCR.space API configuration
-OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "helloworld")  # Free tier key, replace with your own
+OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY", "helloworld")
 OCR_SPACE_API_URL = "https://api.ocr.space/parse/image"
 
 
@@ -55,15 +55,7 @@ class ProcessRequest(BaseModel):
 @app.get("/")
 async def root():
     """Health check endpoint."""
-    return Response(
-        content='{"status":"ok","message":"ProStruct Stamp Extractor API is running","version":"1.0.0"}',
-        media_type="application/json",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        }
-    )
+    return {"status": "ok", "message": "ProStruct Stamp Extractor API is running", "version": "2.0.0"}
 
 
 @app.post("/upload")
@@ -83,13 +75,8 @@ async def upload_pdf(file: UploadFile = File(...)):
         doc.close()
         
         return {"file_id": file_id, "page_count": page_count, "filename": file.filename, "pages": pages_info}
-    except HTTPException:
-        raise
     except Exception as e:
-        # Ensure proper error response with CORS headers
         print(f"[UPLOAD ERROR] {str(e)}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
@@ -108,21 +95,8 @@ async def get_page_image(file_id: str, page_index: int):
         
         pix = doc[page_index].get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
         img_data = pix.tobytes("png")
-        # Free pixmap immediately to save memory
         del pix
         doc.close()
-        
-        # Compress if image is too large (>3MB to stay under 512MB limit)
-        img_size_mb = len(img_data) / (1024 * 1024)
-        if img_size_mb > 3:
-            import io
-            from PIL import Image
-            img = Image.open(io.BytesIO(img_data))
-            output = io.BytesIO()
-            # Compress PNG
-            img.save(output, format='PNG', optimize=True, compress_level=9)
-            img_data = output.getvalue()
-            del img, output
         
         return Response(content=img_data, media_type="image/png")
     except HTTPException:
@@ -153,7 +127,7 @@ async def get_cropped_stamp(file_id: str, page_index: int,
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         x, y, w, h = int(x), int(y), int(w), int(h)
-        cropped = img[max(0,y):y+h, max(0,x):x+w]
+        cropped = img[max(0, y):y+h, max(0, x):x+w]
         _, img_encoded = cv2.imencode('.png', cropped)
         img_bytes = img_encoded.tobytes()
     
@@ -173,400 +147,343 @@ async def process_page(req: ProcessRequest):
             doc.close()
             raise HTTPException(status_code=400, detail="Page index out of range")
         
+        # Render page to image
         pix = doc[req.page_index].get_pixmap(matrix=fitz.Matrix(RENDER_SCALE, RENDER_SCALE))
         img_bytes = pix.tobytes("png")
         img_width, img_height = pix.width, pix.height
-        # Free pixmap memory immediately
         pix = None
         doc.close()
         
-        # Calculate search region: right 40% of page, top 70% of that region
-        search_region_x = int(img_width * 0.60)
-        search_region_y = 0
-        search_region_w = img_width - search_region_x
-        search_region_h = int(img_height * 0.70)
+        # === SEARCH REGION: Top-right 40% width, top 70% height ===
+        # This is where stamps are typically found on structural drawings
+        search_x = int(img_width * 0.60)  # Start at 60% from left (right 40%)
+        search_y = 0                       # From top
+        search_w = img_width - search_x    # 40% width
+        search_h = int(img_height * 0.70)  # 70% height from top
         
-        # Detect stamps (pass bytes directly to avoid extra copy)
-        stamps = detect_stamp_regions(img_bytes)
-        if not stamps:
-            # Fallback: use center of search region
-            fallback_x = search_region_x + int(search_region_w * 0.2)
-            fallback_y = search_region_y + int(search_region_h * 0.2)
-            fallback_w = int(search_region_w * 0.6)
-            fallback_h = int(search_region_h * 0.6)
-            stamps = [(fallback_x, fallback_y, fallback_w, fallback_h, 0, True)]
+        search_region = [search_x, search_y, search_w, search_h]
         
-        # Process - decode image once
+        print(f"\n[SEARCH REGION] x={search_x}, y={search_y}, w={search_w}, h={search_h}")
+        
+        # Decode image
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        # Free original bytes immediately after decoding to save memory
         del img_bytes, nparr
-        import gc
-        gc.collect()  # Force garbage collection
         
+        # Detect stamps within search region
+        stamps = detect_stamps(img, search_x, search_y, search_w, search_h)
+        
+        if not stamps:
+            # Fallback: use entire search region as one stamp area
+            print("[DETECTION] No stamps found, using fallback region")
+            stamps = [(search_x + int(search_w * 0.3), search_y + int(search_h * 0.3), 
+                      int(search_w * 0.5), int(search_h * 0.5))]
+        
+        # Process each detected stamp
         results = []
-        for x, y, w, h, score, is_circular in stamps:
-            x, y, w, h = int(x), int(y), int(w), int(h)
-            cropped = img[y:y+h, x:x+w].copy()  # Explicit copy
+        for (x, y, w, h) in stamps:
+            # APPROACH: Crop the CENTER of the stamp where text is straight
+            # The curved perimeter text produces garbage OCR - skip it
+            # Center has: FIRST NAME / LAST NAME / CIVIL or ENVIRONMENTAL / No. XXXXX
+            
+            # Calculate center region (inner 60% of stamp)
+            center_margin_x = int(w * 0.2)  # 20% margin on each side
+            center_margin_y = int(h * 0.2)  # 20% margin on top/bottom
+            
+            center_x = x + center_margin_x
+            center_y = y + center_margin_y
+            center_w = w - (center_margin_x * 2)
+            center_h = h - (center_margin_y * 2)
+            
+            # Ensure valid bounds
+            center_x = max(0, center_x)
+            center_y = max(0, center_y)
+            center_w = min(center_w, img_width - center_x)
+            center_h = min(center_h, img_height - center_y)
+            
+            if center_w < 50 or center_h < 50:
+                # Fallback to full stamp if center is too small
+                center_x, center_y, center_w, center_h = x, y, w, h
+            
+            # Crop center region for OCR
+            cropped = img[center_y:center_y+center_h, center_x:center_x+center_w].copy()
             if cropped.size == 0:
                 continue
             
-            # Process OCR
-            ocr_text = perform_ocr(cropped, is_circular)
-            # Free cropped image immediately after OCR to save memory
+            # Perform OCR on center region
+            ocr_text = perform_ocr(cropped)
             del cropped
             
+            # Extract info
             license_number = extract_license_number(ocr_text)
             engineer_name = extract_engineer_name(ocr_text, license_number)
             
-            results.append({
+            result = {
                 "page": req.page_index + 1,
                 "symbol_type": "approval_stamp",
                 "bounding_box": [x, y, w, h],
                 "engineer_name": engineer_name,
                 "license_number": license_number,
                 "units": "pixels"
-            })
+            }
+            results.append(result)
         
-        # Free main image after processing all stamps
         del img
-        import gc
-        gc.collect()  # Force garbage collection
         
-        # Return single object if one stamp, array if multiple (for backward compatibility)
-        # Include search_region in response for overlay display (but not in JSON output)
-        if len(results) == 1:
-            result = results[0]
-            result["search_region"] = [search_region_x, search_region_y, search_region_w, search_region_h]
-            # Print JSON output to terminal (without search_region)
-            json_output = {k: v for k, v in result.items() if k != "search_region"}
-            print("\n" + "="*80)
-            print("JSON OUTPUT:")
-            print("="*80)
-            print(json.dumps(json_output, indent=2))
-            print("="*80 + "\n")
-            return result
-        # For multiple stamps, return array but also include search_region in each
-        for result in results:
-            result["search_region"] = [search_region_x, search_region_y, search_region_w, search_region_h]
-        # Print JSON output to terminal (without search_region)
-        json_output = [{k: v for k, v in r.items() if k != "search_region"} for r in results]
-        print("\n" + "="*80)
+        # Print JSON output
+        output = results[0] if len(results) == 1 else results
+        print("\n" + "="*60)
         print("JSON OUTPUT:")
-        print("="*80)
-        print(json.dumps(json_output, indent=2))
-        print("="*80 + "\n")
-        return results
+        print("="*60)
+        print(json.dumps(output, indent=2))
+        print("="*60 + "\n")
+        
+        return output
         
     except HTTPException:
-        # Re-raise HTTP exceptions as-is (they already have proper status codes)
         raise
     except Exception as e:
-        # Catch all other exceptions to prevent 502 errors on Render
-        # This ensures proper HTTP response with CORS headers instead of worker crash
         print(f"[PROCESS ERROR] {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 
-# === Detection & OCR Functions ===
+# === Stamp Detection ===
 
-def detect_stamp_regions(page_image_bytes):
-    """Detect circular stamp regions using contour analysis with circularity verification.
-    Searches in the right 40% of page, top 70% of that region."""
-    nparr = np.frombuffer(page_image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        return []
+def detect_stamps(img, zone_x, zone_y, zone_w, zone_h):
+    """Detect circular stamp regions using improved Hough Circle Detection.
+    Uses multi-scale detection and strict validation to find engineer stamps."""
     
-    h, w = img.shape[:2]
+    # Extract the search zone
+    zone = img[zone_y:zone_y+zone_h, zone_x:zone_x+zone_w].copy()
+    zone_height, zone_width = zone.shape[:2]
     
-    # Focus on right 40% of page where stamps typically are
-    zone_x = int(w * 0.60)
-    zone_width = w - zone_x
-    
-    # Within that region, focus on top 70% vertically
-    zone_y = 0
-    zone_height = int(h * 0.70)
-    
-    zone = img[zone_y:zone_y+zone_height, zone_x:zone_x+zone_width].copy()
-    zone_h, zone_w = zone.shape[:2]
-    # Free full image immediately after extracting zone
-    del img
-    import gc
-    gc.collect()
+    print(f"[DETECTION] Searching in zone: ({zone_x},{zone_y}) size {zone_width}x{zone_height}")
     
     # Convert to grayscale and preprocess
     gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
-    del zone  # Free zone after converting to grayscale
+    
+    # Apply CLAHE for better contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    
+    # Gaussian blur to reduce noise
     gray = cv2.GaussianBlur(gray, (5, 5), 1)
     
-    # Use Canny edge detection
-    edges = cv2.Canny(gray, 30, 100)
+    all_circles = []
     
-    # Dilate to connect broken edges
+    # Try multiple radius ranges for different stamp sizes
+    radius_ranges = [
+        (30, 60),    # Small stamps
+        (50, 100),   # Medium stamps  
+        (80, 150),   # Large stamps
+        (120, 200),  # Very large stamps
+    ]
+    
+    for min_r, max_r in radius_ranges:
+        if max_r > min(zone_width, zone_height) // 2:
+            max_r = min(zone_width, zone_height) // 2
+        if min_r >= max_r:
+            continue
+            
+        circles = cv2.HoughCircles(
+            gray,
+            cv2.HOUGH_GRADIENT,
+            dp=1.5,
+            minDist=min_r,
+            param1=80,
+            param2=40,
+            minRadius=min_r,
+            maxRadius=max_r
+        )
+        
+        if circles is not None:
+            for c in circles[0]:
+                all_circles.append((int(c[0]), int(c[1]), int(c[2])))
+    
+    print(f"[DETECTION] Found {len(all_circles)} potential circles")
+    
+    # Filter and validate circles
+    candidates = []
+    for (cx, cy, radius) in all_circles:
+        # Create bounding box centered on circle
+        x1 = max(0, cx - radius)
+        y1 = max(0, cy - radius)
+        x2 = min(zone_width, cx + radius)
+        y2 = min(zone_height, cy + radius)
+        
+        bw = x2 - x1
+        bh = y2 - y1
+        
+        if bw < 50 or bh < 50:
+            continue
+        
+        # Extract ROI and verify it contains content
+        roi = gray[y1:y2, x1:x2]
+        if roi.size == 0:
+            continue
+        
+        # Check edge density (stamps have circular edges and text)
+        edges = cv2.Canny(roi, 50, 150)
+        edge_density = np.sum(edges > 0) / roi.size
+        
+        if edge_density < 0.03:  # Need at least 3% edges
+            print(f"[DETECTION] Rejecting circle ({cx},{cy}) r={radius}: low edges {edge_density:.3f}")
+            continue
+        
+        # Verify circular edge pattern using mask
+        mask = np.zeros_like(roi)
+        center = (bw // 2, bh // 2)
+        actual_radius = min(bw, bh) // 2
+        cv2.circle(mask, center, actual_radius, 255, 3)
+        cv2.circle(mask, center, int(actual_radius * 0.8), 255, 2)
+        
+        # Check if edges align with expected circular pattern
+        edge_mask_overlap = np.sum((edges > 0) & (mask > 0))
+        circle_perimeter = 2 * np.pi * actual_radius
+        circularity_score = edge_mask_overlap / (circle_perimeter * 3) if circle_perimeter > 0 else 0
+        
+        if circularity_score < 0.15:
+            print(f"[DETECTION] Rejecting circle ({cx},{cy}) r={radius}: low circularity {circularity_score:.3f}")
+            continue
+        
+        # Convert to global coordinates
+        global_x = zone_x + x1
+        global_y = zone_y + y1
+        
+        # Score based on radius and edge density
+        score = radius * edge_density * 100
+        
+        candidates.append({
+            'x': global_x,
+            'y': global_y,
+            'w': bw,
+            'h': bh,
+            'radius': radius,
+            'score': score
+        })
+        print(f"[DETECTION] Valid stamp at ({global_x},{global_y}) size={bw}x{bh} r={radius} score={score:.1f}")
+    
+    # Remove duplicates (circles with similar positions)
+    final_stamps = []
+    for cand in sorted(candidates, key=lambda x: x['score'], reverse=True):
+        is_duplicate = False
+        for existing in final_stamps:
+            dist = np.sqrt((cand['x'] - existing['x'])**2 + (cand['y'] - existing['y'])**2)
+            if dist < min(cand['radius'], existing['radius']):
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            final_stamps.append(cand)
+    
+    # Return top 2 stamps
+    result = [(s['x'], s['y'], s['w'], s['h']) for s in final_stamps[:2]]
+    print(f"[DETECTION] Returning {len(result)} stamps")
+    return result
+
+
+def detect_stamps_contour_fallback(gray, zone_x, zone_y, zone_width, zone_height):
+    """Fallback contour-based detection for stamps that aren't perfectly circular."""
+    edges = cv2.Canny(gray, 30, 100)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     edges = cv2.dilate(edges, kernel, iterations=2)
-    # Note: Keep gray for circle detection - will delete after loop
     
-    # Find contours
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     candidates = []
-    
-    # Expected stamp size range (as fraction of zone dimensions)
-    min_stamp_size = min(zone_h, zone_w) * 0.05  # 5% of zone
-    max_stamp_size = min(zone_h, zone_w) * 0.25  # 25% of zone
-    
-    print(f"[DETECTION] Analyzing {len(contours)} contours, zone size: {zone_w}x{zone_h}")
-    print(f"[DETECTION] Stamp size range: {min_stamp_size:.0f} - {max_stamp_size:.0f} pixels")
+    min_size = min(zone_height, zone_width) * 0.04  # Smaller minimum
+    max_size = min(zone_height, zone_width) * 0.20
     
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < 40000:  # Skip small contours (letters like 'O')
+        if area < 2000:
             continue
         
-        # Get bounding rectangle
         bx, by, bw, bh = cv2.boundingRect(cnt)
         
-        # Check size - must be within expected stamp size range
-        if bw < min_stamp_size or bw > max_stamp_size:
-            continue
-        if bh < min_stamp_size or bh > max_stamp_size:
+        # Check size and aspect ratio - STRICT for circular stamps only
+        if bw < min_size or bw > max_size or bh < min_size or bh > max_size:
             continue
         
-        # Check aspect ratio - stamps are roughly square (circular)
         aspect = bw / bh if bh > 0 else 0
-        if aspect < 0.7 or aspect > 1.4:
+        if aspect < 0.8 or aspect > 1.25:  # Must be nearly square (circular)
             continue
         
-        # Calculate circularity
+        # Calculate circularity - STRICT requirement
         perimeter = cv2.arcLength(cnt, True)
         circularity = 4 * np.pi * area / (perimeter ** 2) if perimeter > 0 else 0
         
-        # Get minimum enclosing circle to verify circular shape
-        (cx, cy), radius = cv2.minEnclosingCircle(cnt)
-        circle_area = np.pi * radius * radius
-        fill_ratio = area / circle_area if circle_area > 0 else 0
-        
-        # Must have high circularity OR high fill ratio for a circle
-        if circularity < 0.35 and fill_ratio < 0.45:
+        if circularity < 0.6:  # Must be circular (text blocks are < 0.5)
+            print(f"[DETECTION] Fallback rejecting contour - low circularity: {circularity:.2f}")
             continue
         
-        # --- NEW: Check internal complexity (stamps have text inside, letters don't) ---
-        # Get ROI for this contour
-        roi = edges[by:by+bh, bx:bx+bw]
+        # Add minimal padding (tighter boxes)
+        padding = int(min(bw, bh) * 0.05)  # Reduced from 0.15 to 0.05
+        global_x = zone_x + bx - padding
+        global_y = zone_y + by - padding
         
-        # Count internal contours in this ROI
-        roi_contours, _ = cv2.findContours(roi, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # A stamp should have many internal details (text, seal rings, etc.)
-        # A letter 'O' will have very few (usually just 2-3 contours)
-        if len(roi_contours) < 15:
-            print(f"[DETECTION] Rejecting candidate at ({bx},{by}) - low complexity: {len(roi_contours)} contours")
-            continue
-            
-        # --- CRITICAL: Verify it actually contains a circle (Seal) ---
-        # This filters out title blocks which are square/rectangular but have no circle inside
-        candidate_roi = gray[by:by+bh, bx:bx+bw]
-        h_roi, w_roi = candidate_roi.shape
-        
-        # Enhanced circle detection for stamps (including concentric circles)
-        # Use multiple parameter sets to detect circles of different sizes
-        circle_detected = False
-        concentric_circles = 0
-        
-        # Try detecting outer circle (larger)
-        circles_outer = cv2.HoughCircles(
-            candidate_roi,
-            cv2.HOUGH_GRADIENT,
-            dp=1.2,
-            minDist=min(bw, bh) * 0.3,
-            param1=50,
-            param2=40,  # Slightly relaxed for better detection
-            minRadius=int(min(bw, bh) * 0.20),
-            maxRadius=int(min(bw, bh) * 0.55)
-        )
-        
-        # Try detecting inner circle (smaller, concentric)
-        circles_inner = cv2.HoughCircles(
-            candidate_roi,
-            cv2.HOUGH_GRADIENT,
-            dp=1.2,
-            minDist=min(bw, bh) * 0.2,
-            param1=50,
-            param2=45,
-            minRadius=int(min(bw, bh) * 0.10),
-            maxRadius=int(min(bw, bh) * 0.35)
-        )
-        
-        # Check for outer circle
-        if circles_outer is not None:
-            circles_outer = np.uint16(np.around(circles_outer))
-            for circle in circles_outer[0, :]:
-                center_x, center_y, radius = circle[0], circle[1], circle[2]
-                dist_from_center = ((center_x - w_roi/2)**2 + (center_y - h_roi/2)**2)**0.5
-                if dist_from_center < min(w_roi, h_roi) * 0.35:  # Must be within 35% of center
-                    circle_detected = True
-                    concentric_circles += 1
-                    break
-        
-        # Check for inner circle (concentric)
-        if circles_inner is not None:
-            circles_inner = np.uint16(np.around(circles_inner))
-            for circle in circles_inner[0, :]:
-                center_x, center_y, radius = circle[0], circle[1], circle[2]
-                dist_from_center = ((center_x - w_roi/2)**2 + (center_y - h_roi/2)**2)**0.5
-                if dist_from_center < min(w_roi, h_roi) * 0.35:
-                    concentric_circles += 1
-                    break
-        
-        # Also check for circular contours (alternative method)
-        # Find contours in the ROI and check for circular shapes
-        roi_edges = edges[by:by+bh, bx:bx+bw]
-        roi_contours_circle, _ = cv2.findContours(roi_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in roi_contours_circle:
-            cnt_area = cv2.contourArea(cnt)
-            if cnt_area < 1000:  # Skip very small contours
-                continue
-            cnt_perimeter = cv2.arcLength(cnt, True)
-            cnt_circularity = 4 * np.pi * cnt_area / (cnt_perimeter ** 2) if cnt_perimeter > 0 else 0
-            if cnt_circularity > 0.6:  # High circularity
-                # Check if center is roughly in the middle
-                M = cv2.moments(cnt)
-                if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
-                    dist_from_center = ((cx - w_roi/2)**2 + (cy - h_roi/2)**2)**0.5
-                    if dist_from_center < min(w_roi, h_roi) * 0.4:
-                        circle_detected = True
-                        break
-        
-        if not circle_detected:
-            print(f"[DETECTION] Rejecting candidate at ({bx},{by}) - NO CIRCLE FOUND inside (likely title block)")
-            continue
-            
-        if concentric_circles >= 2:
-            print(f"[DETECTION] Found concentric circles at ({bx},{by}) - {concentric_circles} circles detected")
-            
-        print(f"[DETECTION] Accepted candidate at ({bx},{by}) - complexity: {len(roi_contours)} contours, has centered circle")
-        
-        # Calculate score based on complexity, circularity and fill ratio
-        norm_complexity = min(len(roi_contours) / 100.0, 1.0)
-        score = (circularity * 30) + (fill_ratio * 30) + (norm_complexity * 40)
-        
-        # Add to candidates with global coordinates (accounting for zone offset)
-        x = zone_x + bx
-        y = zone_y + by
-        
-        # Add padding
-        padding = int(min(bw, bh) * 0.15)
-        x = max(0, x - padding)
-        y = max(0, y - padding)
-        bw = bw + (padding * 2)
-        bh = bh + (padding * 2)
-        
-        candidates.append((x, y, bw, bh, score, True))
-        print(f"[DETECTION] Found candidate: pos=({x},{y}), size={bw}x{bh}, circularity={circularity:.2f}, fill={fill_ratio:.2f}, score={score:.1f}")
+        candidates.append((max(0, global_x), max(0, global_y), bw + padding*2, bh + padding*2, circularity))
+        print(f"[DETECTION] Fallback found stamp at ({global_x}, {global_y}), circularity={circularity:.2f}")
     
-    # Free gray and edges after processing all candidates
-    del gray, edges
-    import gc
-    gc.collect()
-    
-    # Sort by score descending
-    candidates.sort(key=lambda x: x[4], reverse=True)
-    
-    # Remove overlapping detections
-    candidates = filter_overlapping_stamps(candidates)
-    
-    print(f"[DETECTION] Final candidates: {len(candidates)}")
-    
-    # Limit to 2 stamps (typical for engineer drawings)
-    return candidates[:2]
+    return candidates
 
 
-def filter_overlapping_stamps(candidates):
-    """Remove overlapping stamp detections using IoU-based NMS."""
+def remove_overlapping(candidates):
+    """Remove overlapping stamp detections using NMS."""
     if len(candidates) <= 1:
         return candidates
     
     filtered = []
-    for candidate in candidates:
-        x1, y1, w1, h1 = candidate[0], candidate[1], candidate[2], candidate[3]
+    for cand in candidates:
+        x1, y1, w1, h1, score1 = cand
         
-        is_duplicate = False
+        is_dup = False
         for kept in filtered:
-            x2, y2, w2, h2 = kept[0], kept[1], kept[2], kept[3]
+            x2, y2, w2, h2, score2 = kept
             
             # Calculate IoU
             xi1, yi1 = max(x1, x2), max(y1, y2)
             xi2, yi2 = min(x1 + w1, x2 + w2), min(y1 + h1, y2 + h2)
+            inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+            union = w1 * h1 + w2 * h2 - inter
+            iou = inter / union if union > 0 else 0
             
-            inter_area = max(0, xi2 - xi1) * max(0, yi2 - yi1)
-            union_area = w1 * h1 + w2 * h2 - inter_area
-            iou = inter_area / union_area if union_area > 0 else 0
-            
-            # Check center distance
-            cx1, cy1 = x1 + w1/2, y1 + h1/2
-            cx2, cy2 = x2 + w2/2, y2 + h2/2
-            center_dist = ((cx1-cx2)**2 + (cy1-cy2)**2)**0.5
-            
-            if iou > 0.2 or center_dist < min(w1, w2) * 0.6:
-                is_duplicate = True
+            if iou > 0.3:
+                is_dup = True
                 break
         
-        if not is_duplicate:
-            filtered.append(candidate)
+        if not is_dup:
+            filtered.append(cand)
     
     return filtered
 
 
-def preprocess_for_ocr(crop_img, is_circular=False):
-    """Preprocess image for OCR: optimize for memory efficiency."""
+# === OCR Functions ===
+
+def perform_ocr(crop_img):
+    """Perform OCR using OCR.space API."""
+    # Preprocess
     h, w = crop_img.shape[:2]
-    
-    # Limit upscaling to prevent memory issues (max 500px width instead of 800)
-    if w < 500:
-        scale = min(500 / w, 2.0)  # Cap scale at 2x to prevent huge images
+    if w < 400:
+        scale = min(400 / w, 2.0)
         crop_img = cv2.resize(crop_img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        h, w = crop_img.shape[:2]
     
-    # Convert to RGB (OCR.space expects RGB)
-    if len(crop_img.shape) == 3 and crop_img.shape[2] == 3:
-        # BGR to RGB conversion
+    # Convert BGR to RGB
+    if len(crop_img.shape) == 3:
         crop_img = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB)
-    elif len(crop_img.shape) == 2:
-        # Grayscale to RGB
-        crop_img = cv2.cvtColor(crop_img, cv2.COLOR_GRAY2RGB)
     
-    # Enhance contrast (memory-efficient)
+    # Enhance contrast
     gray = cv2.cvtColor(crop_img, cv2.COLOR_RGB2GRAY) if len(crop_img.shape) == 3 else crop_img
     denoised = cv2.bilateralFilter(gray, 9, 75, 75)
     enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(denoised)
     enhanced_rgb = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2RGB)
     
-    # Free intermediate arrays to save memory
-    del gray, denoised, enhanced
-    
-    return enhanced_rgb
-
-
-def perform_ocr(crop_img, is_circular=False):
-    """Run OCR.space API on preprocessed images."""
-    # Preprocess the image
-    processed_img = preprocess_for_ocr(crop_img, is_circular)
-    
-    # Encode image to base64
-    _, buffer = cv2.imencode('.png', processed_img)
+    # Encode to base64
+    _, buffer = cv2.imencode('.png', enhanced_rgb)
     img_base64 = base64.b64encode(buffer).decode('utf-8')
-    # Free processed image and buffer immediately to save memory
-    del processed_img, buffer
-    import gc
-    gc.collect()
     
-    # Prepare API request
+    # API request
     payload = {
         'apikey': OCR_SPACE_API_KEY,
         'base64Image': f'data:image/png;base64,{img_base64}',
@@ -574,47 +491,23 @@ def perform_ocr(crop_img, is_circular=False):
         'isOverlayRequired': False,
         'detectOrientation': False,
         'scale': True,
-        'OCREngine': 2,  # Engine 2 is more accurate for printed text
+        'OCREngine': 2,
     }
-    # Free base64 string after creating payload (it's copied into payload)
-    del img_base64
     
     try:
-        # Make API request (reduced timeout for Render free tier)
-        response = requests.post(OCR_SPACE_API_URL, data=payload, timeout=20)
+        response = requests.post(OCR_SPACE_API_URL, data=payload, timeout=25)
         response.raise_for_status()
-        
         result = response.json()
         
-        # Extract text from OCR.space response
         if result.get('OCRExitCode') == 1 and result.get('ParsedResults'):
-            # Get text from all parsed results
-            all_text = []
-            for parsed_result in result['ParsedResults']:
-                if parsed_result.get('ParsedText'):
-                    all_text.append(parsed_result['ParsedText'].strip())
-            
-            combined_text = '\n'.join(all_text)
-            
-            # Debug logging
-            print("\n" + "="*50)
-            print("OCR DEBUG OUTPUT (OCR.space):")
-            print(f"OCR Exit Code: {result.get('OCRExitCode')}")
-            print(f"Text length: {len(combined_text)}")
-            print(f"OCR result:\n{combined_text}")
-            print("="*50 + "\n")
-            
-            return combined_text
+            text = '\n'.join([r.get('ParsedText', '') for r in result['ParsedResults']])
+            print(f"\n[OCR] Extracted text:\n{text}\n")
+            return text.strip()
         else:
-            error_msg = result.get('ErrorMessage', 'Unknown error')
-            print(f"[OCR] OCR.space API error: {error_msg}")
+            print(f"[OCR] Error: {result.get('ErrorMessage', 'Unknown')}")
             return ""
-            
-    except requests.exceptions.RequestException as e:
-        print(f"[OCR] OCR.space API request failed: {str(e)}")
-        return ""
     except Exception as e:
-        print(f"[OCR] Unexpected error during OCR: {str(e)}")
+        print(f"[OCR] Request failed: {str(e)}")
         return ""
 
 
@@ -622,13 +515,8 @@ def perform_ocr(crop_img, is_circular=False):
 
 EXCLUDE_KEYWORDS = [
     "STATE", "DATE", "SIGNED", "LICENSE", "PROFESSIONAL", "ENGINEER", "EXPIRES",
-    "EXPIRATION", "CERTIFICATE", "REGISTERED", "BOARD", "CIVIL", "STRUCTURAL",
-    "SEAL", "STAMP", "MECH", "ELEC", "ARCHITECT", "LANDSCAPE", "SURVEYOR",
-    "NUMBER", "ENVIRONMENTAL", "COMMONWEALTH", "MASSACHUSETTS", "CALIFORNIA",
-    "TEXAS", "NEW YORK", "FLORIDA", "PENNSYLVANIA", "OHIO", "ILLINOIS",
-    "MICHIGAN", "VIRGINIA", "WASHINGTON", "ARIZONA", "COLORADO", "OREGON",
-    "NEVADA", "OMMONWEALTH", "ALTH", "SSACHUSETTS", "TATE", "ALE", "HOF",
-    "ZLSY", "SSIONAL", "FESSIONAL", "GISTERED", "ISTERED", "STER"
+    "CERTIFICATE", "REGISTERED", "BOARD", "CIVIL", "STRUCTURAL", "SEAL", "STAMP",
+    "ARCHITECT", "SURVEYOR", "NUMBER", "COMMONWEALTH", "MASSACHUSETTS",
 ]
 
 
@@ -637,16 +525,14 @@ def extract_license_number(text):
     if not text:
         return "Unknown"
     
-    # Normalize various "No." formats
+    # Normalize
     text = re.sub(r'No\s*[\.,:]?', 'No. ', text, flags=re.IGNORECASE)
     text = re.sub(r'#\s*', 'No. ', text)
     
-    # Enhanced patterns for license numbers
     patterns = [
-        r"No\.?\s*(\d{4,7})",  # "No. 39479" or "No.39479"
-        r"#\s*(\d{4,7})",  # "#39479"
-        r"(?:LIC|LICENSE|LICENCE)\s*(?:NO\.?|NUMBER)?\s*[:\#\.]?\s*(\d{4,7})",
-        r"(?:REG|REGISTRATION)\s*(?:NO\.?)?\s*[:\#]?\s*(\d{4,7})",
+        r"No\.?\s*(\d{4,7})",
+        r"#\s*(\d{4,7})",
+        r"(?:LIC|LICENSE|REG)[\w\s]*[:\#\.]?\s*(\d{4,7})",
         r"(?:PE|P\.E\.)\s*(?:NO\.?)?\s*[:\#]?\s*(\d{4,7})",
     ]
     
@@ -654,152 +540,93 @@ def extract_license_number(text):
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             num = match.group(1)
-            print(f"[LICENSE] Found via pattern '{pattern}': {num}")
+            print(f"[LICENSE] Found: {num}")
             return num
     
-    # Fallback: find standalone 4-6 digit numbers (excluding dates)
-    # Scan lines from bottom to top as license numbers are usually at the bottom
-    lines = text.split('\n')[::-1]
-    for line in lines:
+    # Fallback: find standalone numbers
+    for line in reversed(text.split('\n')):
         for num in re.findall(r'\b(\d{4,6})\b', line):
             if not (num.startswith(('19', '20')) and len(num) == 4):
-                print(f"[LICENSE] Found standalone number: {num}")
+                print(f"[LICENSE] Fallback found: {num}")
                 return num
     
-    print("[LICENSE] No license number found")
     return "Unknown"
 
 
 def extract_engineer_name(text, license_number):
-    """Extract engineer name from OCR text."""
+    """Extract engineer name from OCR text - handles multi-line names from stamp centers."""
     if not text:
         return "Unknown"
     
-    print(f"[NAME] Processing text for name extraction...")
-    
-    # First, look for professional designation patterns like "NAME, PE" or "NAME, P.E."
-    pe_patterns = [
-        r'([A-Z][A-Z\s\.]+),\s*P\.?E\.?',  # "THOMAS J. MAHANNA, PE"
-        r'([A-Z][a-zA-Z\s\.]+),\s*P\.?E\.?',  # Mixed case
+    # Keywords to exclude (not engineer names)
+    exclude_words = [
+        "PERMIT", "DRAWINGS", "CONSTRUCTION", "RELEASED", "TEMPORARILY",
+        "PROGRESS", "REVIEW", "BIDDING", "PURPOSES", "DOCUMENT", "INCOMPLETE",
+        "HARVARD", "DEVENS", "WATER", "SYSTEM", "PROJECT", "DEPARTMENT",
+        "PUBLIC", "WORKS", "INTERCONNECTION", "MASSACHUSETTS", "COMMONWEALTH",
+        "STATE", "DATE", "SIGNED", "LICENSE", "PROFESSIONAL", "ENGINEER",
+        "CERTIFICATE", "REGISTERED", "BOARD", "CIVIL", "STRUCTURAL", "SEAL",
+        "STAMP", "ARCHITECT", "SURVEYOR", "NUMBER", "ENVIRONMENTAL", "EXPIRES",
+        "GISTERED", "SSIONAL"  # Partial words from curved text
     ]
-
-    # Common garbage prefixes from OCR (e.g., end of "PROFESSIONAL", line noise)
-    GARBAGE_PREFIXES = [
-        r'^SIONAL\s+(?:SS\s+)?',
-        r'^IONAL\s+(?:SS\s+)?',
-        r'^ONAL\s+(?:SS\s+)?',
-        r'^NAL\s+(?:SS\s+)?',
-        r'^SS\s+',
-        r'^VY\s+',
-        r'^BY\s+',
-        r'^Y\s+',
-    ]
-
-    for pattern in pe_patterns:
-        match = re.search(pattern, text)
-        if match:
-            name = match.group(1).strip()
-            
-            # Clean garbage prefixes
-            for garbage in GARBAGE_PREFIXES:
-                name = re.sub(garbage, '', name, flags=re.IGNORECASE)
-            
-            # Clean up the name
-            name = re.sub(r'\s+', ' ', name).strip()
-            
-            if len(name) > 5:  # Must be a reasonable name length
-                print(f"[NAME] Found via PE pattern: {name}")
-                return name.upper()
     
-    # Second, look for lines with "CIVIL" or "STRUCTURAL" which often follow the name
-    for line in text.split('\n'):
-        if "CIVIL" in line.upper() or "STRUCTURAL" in line.upper():
-            # Potential name line if it has enough text
-            clean_line = re.sub(r'CIVIL|STRUCTURAL|ENGINEER|REGISTERED|PROFESSIONAL', '', line, flags=re.IGNORECASE).strip()
-            
-            # Clean garbage prefixes
-            for garbage in GARBAGE_PREFIXES:
-                clean_line = re.sub(garbage, '', clean_line, flags=re.IGNORECASE)
-            
-            if len(clean_line) > 5 and sum(c.isalpha() for c in clean_line) / len(clean_line) > 0.5:
-                 print(f"[NAME] Found via Keyword line: {clean_line}")
-                 return clean_line.upper()
-
-    lines = [l.strip() for l in text.replace('\r\n', '\n').split('\n') if l.strip()]
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
     
-    cleaned = []
+    # Clean lines - remove lines with numbers, "No.", excluded words
+    clean_lines = []
     for line in lines:
+        line_upper = line.upper()
         # Skip lines with excluded keywords
-        if any(kw in line.upper() for kw in EXCLUDE_KEYWORDS):
+        if any(kw in line_upper for kw in exclude_words):
             continue
-        
-        # Remove license number from line
-        if license_number != "Unknown" and license_number in line:
-            line = line.replace(license_number, "").strip()
-            line = re.sub(r'No\.?\s*', '', line, flags=re.IGNORECASE).strip()
-        
-        # Remove common OCR artifacts and extra punctuation
-        line = re.sub(r'[\.,;:\-_]+$', '', line).strip()
-        
-        # Clean garbage prefixes
-        for garbage in GARBAGE_PREFIXES:
-            line = re.sub(garbage, '', line, flags=re.IGNORECASE)
-        
+        # Skip lines with numbers or "No."
+        if re.search(r'\d|No\.', line):
+            continue
+        # Skip very short lines
+        if len(line) < 3:
+            continue
         # Must be mostly alphabetic
-        if len(line) >= 3:
-            alpha_ratio = sum(c.isalpha() or c.isspace() for c in line) / len(line)
-            if alpha_ratio >= 0.6:
-                cleaned.append(line)
+        alpha_ratio = sum(c.isalpha() or c in '. ' for c in line) / len(line) if line else 0
+        if alpha_ratio >= 0.8:
+            clean_lines.append(line.strip())
     
-    def score(s):
-        s = s.strip()
-        if len(s) < 4:
-            return 0
-        
-        alpha_count = sum(c.isalpha() for c in s)
-        if alpha_count < len(s) * 0.7:
-            return 0
-        
-        sc = len(s)
-        
-        # Prefer 2-4 word names
-        word_count = len(s.split())
-        if 2 <= word_count <= 4:
-            sc += 40
-        elif word_count == 1 and len(s) > 8:
-            sc += 20
-        
-        # Penalize numbers
-        if any(c.isdigit() for c in s):
-            sc -= 40
-        
-        # Prefer proper capitalization patterns
-        if s[0].isupper():
-            sc += 10
-        
-        # Boost if contains period (like initial "J.")
-        if '.' in s:
-            sc += 15
-        
-        return sc
+    print(f"[NAME] Clean lines: {clean_lines}")
     
-    # Score individual lines
-    candidates = [(l, score(l)) for l in cleaned if score(l) > 0]
+    # APPROACH 1: Combine consecutive lines to form full name
+    # E.g., ["MARY E.", "DANIELSON"] -> "MARY E. DANIELSON"
+    # E.g., ["THOMAS", "MAHANNA"] -> "THOMAS MAHANNA"
+    if len(clean_lines) >= 2:
+        for i in range(len(clean_lines) - 1):
+            first_part = clean_lines[i]
+            second_part = clean_lines[i + 1]
+            
+            # Check if first part looks like first name (or first + middle initial)
+            # Check if second part looks like last name
+            first_words = first_part.split()
+            second_words = second_part.split()
+            
+            if 1 <= len(first_words) <= 2 and len(second_words) == 1:
+                combined = f"{first_part} {second_part}"
+                if len(combined) >= 8:  # Reasonable name length
+                    print(f"[NAME] Combined lines: {combined}")
+                    return combined.upper()
     
-    # Try merging consecutive lines
-    for i in range(len(cleaned) - 1):
-        merged = f"{cleaned[i]} {cleaned[i+1]}"
-        s = score(merged)
-        if s > 0:
-            candidates.append((merged, s + 10))
+    # APPROACH 2: Single line that looks like a full name
+    for line in clean_lines:
+        words = line.split()
+        if 2 <= len(words) <= 4:
+            # All words should start with capital
+            if all(w[0].isupper() for w in words if w and w[0].isalpha()):
+                print(f"[NAME] Found single line name: {line}")
+                return line.upper()
     
-    if candidates:
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        best_name = ' '.join(candidates[0][0].upper().split())
-        print(f"[NAME] Extracted: {best_name} (score: {candidates[0][1]})")
-        return best_name
+    # APPROACH 3: Just return first clean line if it looks like a name part
+    if clean_lines:
+        first_line = clean_lines[0]
+        if len(first_line) >= 4 and first_line[0].isupper():
+            print(f"[NAME] Using first clean line: {first_line}")
+            return first_line.upper()
     
-    print("[NAME] No valid name found")
     return "Unknown"
 
 

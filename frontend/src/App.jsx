@@ -126,12 +126,30 @@ function App() {
 
   // Calculate Box Style for a specific stamp
   const getBoxStyle = (stamp, index) => {
-    if (!stamp || !stamp.bounding_box || imgDimensions.naturalWidth === 0) return { display: 'none' };
+    if (!stamp || !stamp.bounding_box) return { display: 'none' };
+
+    // Get current image dimensions from ref if state is stale
+    let displayWidth = imgDimensions.width;
+    let displayHeight = imgDimensions.height;
+    let naturalWidth = imgDimensions.naturalWidth;
+    let naturalHeight = imgDimensions.naturalHeight;
+
+    // Fallback to imgRef if dimensions are 0
+    if (imgRef.current && (naturalWidth === 0 || displayWidth === 0)) {
+      displayWidth = imgRef.current.offsetWidth;
+      displayHeight = imgRef.current.offsetHeight;
+      naturalWidth = imgRef.current.naturalWidth;
+      naturalHeight = imgRef.current.naturalHeight;
+    }
+
+    if (naturalWidth === 0 || naturalHeight === 0) return { display: 'none' };
 
     const [x, y, w, h] = stamp.bounding_box;
-    const scaleX = imgDimensions.width / imgDimensions.naturalWidth;
-    const scaleY = imgDimensions.height / imgDimensions.naturalHeight;
+    const scaleX = displayWidth / naturalWidth;
+    const scaleY = displayHeight / naturalHeight;
     const color = boxColors[index % boxColors.length];
+
+    console.log(`[BOX] Stamp ${index}: bbox=[${x},${y},${w},${h}], scale=[${scaleX.toFixed(3)},${scaleY.toFixed(3)}], display=[${displayWidth},${displayHeight}], natural=[${naturalWidth},${naturalHeight}]`);
 
     return {
       left: `${x * scaleX}px`,
@@ -141,38 +159,36 @@ function App() {
       position: 'absolute',
       border: `3px solid ${color.border}`,
       backgroundColor: color.bg,
-      zIndex: 10,
+      zIndex: 15,
       pointerEvents: 'none'
     };
   };
 
-  // Calculate Search Region Overlay Style
+  // Calculate Search Region Overlay Style - right 40% width, top 70% height
+  // This shows immediately when the page loads (before detection)
   const getSearchRegionStyle = () => {
-    if (!results || imgDimensions.naturalWidth === 0) return { display: 'none' };
-
-    // Get search region from results (could be single object or array)
-    let searchRegion = null;
-    if (!Array.isArray(results) && results.search_region) {
-      searchRegion = results.search_region;
-    } else if (Array.isArray(results) && results.length > 0 && results[0].search_region) {
-      searchRegion = results[0].search_region;
+    if (imgDimensions.naturalWidth === 0 || imgDimensions.naturalHeight === 0) {
+      return { display: 'none' };
     }
 
-    if (!searchRegion) return { display: 'none' };
+    // Search region: right 40% width (start at 60%), top 70% height
+    const naturalX = imgDimensions.naturalWidth * 0.60;
+    const naturalY = 0;
+    const naturalW = imgDimensions.naturalWidth * 0.40;
+    const naturalH = imgDimensions.naturalHeight * 0.70;
 
-    const [x, y, w, h] = searchRegion;
     const scaleX = imgDimensions.width / imgDimensions.naturalWidth;
     const scaleY = imgDimensions.height / imgDimensions.naturalHeight;
 
     return {
-      left: `${x * scaleX}px`,
-      top: `${y * scaleY}px`,
-      width: `${w * scaleX}px`,
-      height: `${h * scaleY}px`,
+      left: `${naturalX * scaleX}px`,
+      top: `${naturalY * scaleY}px`,
+      width: `${naturalW * scaleX}px`,
+      height: `${naturalH * scaleY}px`,
       position: 'absolute',
-      border: `2px dashed #6366f1`, // Indigo dashed border
-      backgroundColor: 'rgba(99, 102, 241, 0.1)', // Light indigo background
-      zIndex: 5, // Below stamp boxes but visible
+      border: `2px dashed #6366f1`,
+      backgroundColor: 'rgba(99, 102, 241, 0.08)',
+      zIndex: 5,
       pointerEvents: 'none'
     };
   };
@@ -273,11 +289,22 @@ function App() {
                       Detect Stamp
                     </button>
                   )}
+
+                  {/* Upload Different PDF Button */}
+                  <button
+                    onClick={() => setFileId(null)}
+                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded font-medium hover:bg-gray-200 transition flex items-center gap-2 shadow-sm border border-gray-300"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                    </svg>
+                    New PDF
+                  </button>
                 </div>
               </div>
 
               {/* Image Canvas */}
-              <div className="relative bg-white p-2 rounded-lg shadow overflow-hidden flex justify-center border border-gray-200" style={{ minHeight: '500px' }}>
+              <div className="relative bg-white p-2 rounded-lg shadow flex justify-center border border-gray-200" style={{ minHeight: '500px' }}>
                 {imageLoading && (
                   <div className="flex items-center justify-center h-full">
                     <div className="text-gray-500">Loading page image...</div>
@@ -289,7 +316,7 @@ function App() {
                   </div>
                 )}
                 {!imageError && (
-                  <div className="relative inline-block">
+                  <div style={{ position: 'relative', display: 'inline-block' }}>
                     <img
                       ref={imgRef}
                       src={getPageImageUrl(fileId, currentPage)}
@@ -299,20 +326,45 @@ function App() {
                       className="max-w-full h-auto shadow-sm"
                       style={{ maxHeight: '70vh', display: imageLoading ? 'none' : 'block' }}
                     />
-                  {/* Search Region Overlay - shows where OCR search is performed */}
-                  {results && (
-                    <div 
-                      style={getSearchRegionStyle()} 
-                      title="OCR Search Region (Right 40%, Top 70%)"
-                    />
-                  )}
-                  {/* Bounding Box Overlay - handles both single and array response */}
-                  {results && !Array.isArray(results) && results.bounding_box && (
-                    <div style={getBoxStyle(results, 0)} title={`Detected: ${results.engineer_name}`} />
-                  )}
-                  {results && Array.isArray(results) && results.map((stamp, idx) => (
-                    <div key={idx} style={getBoxStyle(stamp, idx)} title={`Stamp ${idx + 1}: ${stamp.engineer_name}`} />
-                  ))}
+                    {/* Search Region Overlay - Right 40%, Top 70% */}
+                    {!imageLoading && (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          right: '0',
+                          top: '0',
+                          width: '40%',
+                          height: '70%',
+                          border: '3px dashed #6366f1',
+                          backgroundColor: 'rgba(99, 102, 241, 0.12)',
+                          zIndex: 10,
+                          pointerEvents: 'none',
+                          boxSizing: 'border-box'
+                        }}
+                      >
+                        <span style={{
+                          position: 'absolute',
+                          top: '8px',
+                          left: '8px',
+                          backgroundColor: '#6366f1',
+                          color: 'white',
+                          padding: '4px 8px',
+                          fontSize: '12px',
+                          fontWeight: 'bold',
+                          borderRadius: '4px',
+                          boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                        }}>
+                          Search Region
+                        </span>
+                      </div>
+                    )}
+                    {/* Stamp Bounding Boxes - appear after detection */}
+                    {results && !Array.isArray(results) && results.bounding_box && (
+                      <div style={getBoxStyle(results, 0)} title={`Detected: ${results.engineer_name}`} />
+                    )}
+                    {results && Array.isArray(results) && results.map((stamp, idx) => (
+                      <div key={idx} style={getBoxStyle(stamp, idx)} title={`Stamp ${idx + 1}: ${stamp.engineer_name}`} />
+                    ))}
                   </div>
                 )}
               </div>
@@ -422,13 +474,6 @@ function App() {
                 </div>
               )}
             </div>
-
-            <button
-              onClick={() => setFileId(null)}
-              className="text-gray-500 hover:text-gray-700 text-sm w-full text-center"
-            >
-              Upload a different PDF
-            </button>
           </div>
         )}
       </div>
