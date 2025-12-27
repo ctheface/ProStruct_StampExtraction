@@ -69,19 +69,28 @@ async def root():
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     """Upload PDF and return file ID with page count."""
-    file_id = str(uuid.uuid4())
-    file_location = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
-    
-    with open(file_location, "wb+") as f:
-        shutil.copyfileobj(file.file, f)
-    
-    doc = fitz.open(file_location)
-    pages_info = [{"index": i, "width": doc[i].rect.width, "height": doc[i].rect.height} 
-                  for i in range(doc.page_count)]
-    page_count = doc.page_count
-    doc.close()
-    
-    return {"file_id": file_id, "page_count": page_count, "filename": file.filename, "pages": pages_info}
+    try:
+        file_id = str(uuid.uuid4())
+        file_location = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
+        
+        with open(file_location, "wb+") as f:
+            shutil.copyfileobj(file.file, f)
+        
+        doc = fitz.open(file_location)
+        pages_info = [{"index": i, "width": doc[i].rect.width, "height": doc[i].rect.height} 
+                      for i in range(doc.page_count)]
+        page_count = doc.page_count
+        doc.close()
+        
+        return {"file_id": file_id, "page_count": page_count, "filename": file.filename, "pages": pages_info}
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Ensure proper error response with CORS headers
+        print(f"[UPLOAD ERROR] {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
 @app.get("/page/{file_id}/{page_index}")
@@ -437,7 +446,7 @@ def detect_stamp_regions(page_image_bytes):
         if not circle_detected:
             print(f"[DETECTION] Rejecting candidate at ({bx},{by}) - NO CIRCLE FOUND inside (likely title block)")
             continue
-        
+            
         if concentric_circles >= 2:
             print(f"[DETECTION] Found concentric circles at ({bx},{by}) - {concentric_circles} circles detected")
             
@@ -586,15 +595,15 @@ def perform_ocr(crop_img, is_circular=False):
                     all_text.append(parsed_result['ParsedText'].strip())
             
             combined_text = '\n'.join(all_text)
-            
-            # Debug logging
-            print("\n" + "="*50)
+    
+    # Debug logging
+    print("\n" + "="*50)
             print("OCR DEBUG OUTPUT (OCR.space):")
             print(f"OCR Exit Code: {result.get('OCRExitCode')}")
             print(f"Text length: {len(combined_text)}")
             print(f"OCR result:\n{combined_text}")
-            print("="*50 + "\n")
-            
+    print("="*50 + "\n")
+    
             return combined_text
         else:
             error_msg = result.get('ErrorMessage', 'Unknown error')
