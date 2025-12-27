@@ -595,15 +595,15 @@ def perform_ocr(crop_img, is_circular=False):
                     all_text.append(parsed_result['ParsedText'].strip())
             
             combined_text = '\n'.join(all_text)
-    
-    # Debug logging
-    print("\n" + "="*50)
+            
+            # Debug logging
+            print("\n" + "="*50)
             print("OCR DEBUG OUTPUT (OCR.space):")
             print(f"OCR Exit Code: {result.get('OCRExitCode')}")
             print(f"Text length: {len(combined_text)}")
             print(f"OCR result:\n{combined_text}")
-    print("="*50 + "\n")
-    
+            print("="*50 + "\n")
+            
             return combined_text
         else:
             error_msg = result.get('ErrorMessage', 'Unknown error')
