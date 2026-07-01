@@ -2,6 +2,10 @@
 
 A web application that automatically detects and extracts engineer approval stamps from PDF structural drawings. Uses computer vision (Hough Circle Detection) and OCR to identify circular stamps, extract engineer names and license numbers, and display results with visual overlays.
 
+![ProStruct UI — PDF viewer with search region overlay](images/Screenshot%202026-07-01%20132842.png)
+
+![Extraction results — detected stamps with engineer name and license](images/Screenshot%202026-07-01%20132933.png)
+
 ## 🎯 Features
 
 - **PDF Upload & Page Selection**: Upload PDF drawings and navigate through pages
