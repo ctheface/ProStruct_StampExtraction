@@ -74,24 +74,69 @@ The uploaded PDF is stored temporarily and assigned a unique `file_id`. When a p
 Instead of scanning the whole sheet, detection focuses on the **right 40% of the width and top 70% of the height** — the region where approval stamps almost always appear on structural drawings (near the title block). This makes detection faster and dramatically reduces false positives from drawing details like column grids and circular annotations.
 
 **3. Multi-Scale Hough Circle Detection**
-The search region is converted to grayscale and contrast-enhanced with CLAHE (adaptive histogram equalization). OpenCV's `HoughCircles` is then run at **four radius ranges** (30–60, 50–100, 80–150, 120–200 px) so both small and large stamps are found regardless of scan resolution.
+The search region is converted to grayscale and contrast-enhanced with CLAHE (adaptive histogram equalization). OpenCV's `HoughCircles` is then run at **four radius ranges** (30–60, 50–100, 80–150, 120–200 px) so both small and large stamps are found regardless of scan resolution:
+
+```python
+circles = cv2.HoughCircles(
+    gray_image,
+    cv2.HOUGH_GRADIENT,
+    dp=1.5,              # Inverse resolution ratio
+    minDist=min_radius,  # Min distance between circles
+    param1=80,           # Canny edge threshold
+    param2=40,           # Accumulator threshold
+    minRadius=30,        # Smallest stamp radius
+    maxRadius=200        # Largest stamp radius
+)
+```
 
 **4. Circularity Verification**
-Hough detection can fire on things that aren't stamps (arcs, curved text, drawing symbols). Each candidate is verified by running Canny edge detection over the candidate region and measuring how much of the detected edges overlap with an ideal circle ring mask. Candidates with a low circularity score are rejected.
+Hough detection can fire on things that aren't stamps (arcs, curved text, drawing symbols). Each candidate is validated with:
+1. **Edge density**: the region must contain enough edges (rejects empty areas)
+2. **Circularity score**: Canny edges must actually align with an ideal circle ring mask — candidates with low edge-mask overlap are rejected
 
 **5. Overlap Removal (NMS)**
 Because detection runs at multiple scales, the same stamp may be found more than once. Non-Maximum Suppression removes overlapping duplicates, keeping the strongest detection per stamp. If no circles pass verification at all, a contour-based fallback scans the region for closed circular contours.
 
 **6. Center-Crop OCR** *(key insight)*
-The curved text around the stamp perimeter (e.g. "REGISTERED PROFESSIONAL ENGINEER · STATE OF...") produces garbage OCR. So instead of OCR-ing the whole stamp, only the **inner 60%** is cropped — where the text is horizontal and clean:
-- Center contains: FIRST NAME / LAST NAME / CIVIL or ENVIRONMENTAL / No. XXXXX
+The curved text around the stamp perimeter produces garbage OCR — but the **center** has straight, readable text:
 
-The crop is upscaled with cubic interpolation before being sent to the OCR.space API for better character recognition.
+```
+        ┌─────────────────────────────┐
+        │  COMMONWEALTH OF MASS...    │ ← Curved (SKIP!)
+        │    ┌─────────────────┐      │
+        │    │   MARY E.       │      │
+        │    │   DANIELSON     │      │ ← Center (OCR THIS!)
+        │    │   ENVIRONMENTAL │      │
+        │    │   No. 55926     │      │
+        │    └─────────────────┘      │
+        │  ...PROFESSIONAL ENGINEER   │ ← Curved (SKIP!)
+        └─────────────────────────────┘
+```
+
+So only the **inner 60%** of the stamp is cropped (20% margin on each side), then upscaled with cubic interpolation before being sent to the OCR.space API for better character recognition.
 
 **7. Field Extraction**
-The raw OCR text is parsed with regex:
-- **License number**: normalizes variants like `No.`, `No,`, `#` and matches patterns like `No. 55926`, falling back to any standalone 4–6 digit number.
-- **Engineer name**: lines containing digits or license markers are filtered out, and the remaining name lines are combined (e.g. `"MARY E."` + `"DANIELSON"` → `"MARY E. DANIELSON"`).
+The raw OCR text is parsed line-by-line:
+
+- **License number**: normalizes variants like `No.`, `No,`, `#` and matches patterns such as:
+
+```python
+patterns = [
+    r'No\.?\s*(\d{4,6})',     # "No. 55926"
+    r'#\s*(\d{4,6})',         # "# 55926"
+    r'License.*?(\d{4,6})',   # "License 55926"
+]
+```
+
+- **Engineer name**: lines with excluded keywords (`CIVIL`, `ENVIRONMENTAL`, `REGISTERED`, ...) or digits are filtered out, only mostly-alphabetic lines are kept, and consecutive name lines are combined:
+
+```
+OCR Output:          Clean Lines:       Combined:
+MARY E.         →    ["MARY E.",    →   "MARY E. DANIELSON"
+DANIELSON            "DANIELSON"]
+ENVIRONMENTAL
+No. 55926
+```
 
 **8. Response & Visualization**
 The backend returns structured JSON with pixel-space bounding boxes. The frontend scales these boxes to the displayed image size and draws color-coded overlays, plus a cropped preview of each detected stamp fetched from the `/crop` endpoint.
