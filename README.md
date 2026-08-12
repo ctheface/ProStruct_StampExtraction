@@ -44,7 +44,7 @@ ProStruct/
 | OCR | OCR.space API | Text extraction from stamp centers |
 | Frontend | React 19 + Vite | User interface |
 
-## 🔍 How Detection Works
+## 🔍 How It Works
 
 ```
 PDF → Image (150 DPI) → Search Region (right 40%, top 70%)
@@ -54,16 +54,47 @@ PDF → Image (150 DPI) → Search Region (right 40%, top 70%)
                                      ↓
                         Circularity Verification (edge-mask overlap)
                                      ↓
+                        Overlap Removal (Non-Maximum Suppression)
+                                     ↓
                         Center Crop (inner 60% of stamp for OCR)
+                                     ↓
+                        OCR (OCR.space API, upscaled crop)
                                      ↓
                         Name Assembly (combine lines: "MARY E." + "DANIELSON")
                                      ↓
                         License Pattern Matching ("No. 55926")
 ```
 
-### Key Insight: Center-Crop OCR
-The curved text around the stamp perimeter produces garbage OCR. By cropping just the **center 60%** where text is straight, we get clean extraction:
+### Step-by-Step Pipeline
+
+**1. PDF Upload & Rendering**
+The uploaded PDF is stored temporarily and assigned a unique `file_id`. When a page is processed, PyMuPDF renders it to a high-resolution PNG image (150 DPI). Structural drawings are large-format sheets, so this typically produces images 5000+ pixels wide.
+
+**2. Search Region Narrowing**
+Instead of scanning the whole sheet, detection focuses on the **right 40% of the width and top 70% of the height** — the region where approval stamps almost always appear on structural drawings (near the title block). This makes detection faster and dramatically reduces false positives from drawing details like column grids and circular annotations.
+
+**3. Multi-Scale Hough Circle Detection**
+The search region is converted to grayscale and contrast-enhanced with CLAHE (adaptive histogram equalization). OpenCV's `HoughCircles` is then run at **four radius ranges** (30–60, 50–100, 80–150, 120–200 px) so both small and large stamps are found regardless of scan resolution.
+
+**4. Circularity Verification**
+Hough detection can fire on things that aren't stamps (arcs, curved text, drawing symbols). Each candidate is verified by running Canny edge detection over the candidate region and measuring how much of the detected edges overlap with an ideal circle ring mask. Candidates with a low circularity score are rejected.
+
+**5. Overlap Removal (NMS)**
+Because detection runs at multiple scales, the same stamp may be found more than once. Non-Maximum Suppression removes overlapping duplicates, keeping the strongest detection per stamp. If no circles pass verification at all, a contour-based fallback scans the region for closed circular contours.
+
+**6. Center-Crop OCR** *(key insight)*
+The curved text around the stamp perimeter (e.g. "REGISTERED PROFESSIONAL ENGINEER · STATE OF...") produces garbage OCR. So instead of OCR-ing the whole stamp, only the **inner 60%** is cropped — where the text is horizontal and clean:
 - Center contains: FIRST NAME / LAST NAME / CIVIL or ENVIRONMENTAL / No. XXXXX
+
+The crop is upscaled with cubic interpolation before being sent to the OCR.space API for better character recognition.
+
+**7. Field Extraction**
+The raw OCR text is parsed with regex:
+- **License number**: normalizes variants like `No.`, `No,`, `#` and matches patterns like `No. 55926`, falling back to any standalone 4–6 digit number.
+- **Engineer name**: lines containing digits or license markers are filtered out, and the remaining name lines are combined (e.g. `"MARY E."` + `"DANIELSON"` → `"MARY E. DANIELSON"`).
+
+**8. Response & Visualization**
+The backend returns structured JSON with pixel-space bounding boxes. The frontend scales these boxes to the displayed image size and draws color-coded overlays, plus a cropped preview of each detected stamp fetched from the `/crop` endpoint.
 
 ## 📋 Prerequisites
 
@@ -132,6 +163,14 @@ npm run dev                   # Starts on http://localhost:5173
 | `/page/{file_id}/{page_index}` | GET | Get page image (PNG) |
 | `/process` | POST | Detect stamps and extract info |
 | `/crop/{file_id}/{page_index}` | GET | Get cropped stamp region |
+
+## 📤 Pushing Changes to GitHub
+
+```bash
+git add .
+git commit -m "your commit message"
+git push origin main
+```
 
 ## 🐛 Troubleshooting
 

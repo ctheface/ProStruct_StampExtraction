@@ -202,6 +202,19 @@ function App() {
           <p className="text-gray-600">Automated Approval Stamp Detection & OCR</p>
         </header>
 
+        {/* BACKEND SLEEP NOTICE */}
+        {!fileId && (
+          <div className="mb-6 p-4 bg-amber-50 border border-amber-300 rounded-lg flex items-start gap-3">
+            <svg className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+            </svg>
+            <div className="text-sm text-amber-800">
+              <strong>Heads up:</strong> The backend is hosted on Render's free tier, so it goes to sleep after 15 minutes of inactivity.
+              If the site seems unresponsive at first, please wait <strong>2–3 minutes</strong> for the server to wake up, then try again.
+            </div>
+          </div>
+        )}
+
         {/* UPLOAD SECTION */}
         {!fileId && (
           <div className="bg-white p-12 rounded-xl shadow-lg text-center border-2 border-dashed border-gray-300">
@@ -220,6 +233,22 @@ function App() {
             />
             {loading && <p className="mt-4 text-blue-600">Uploading...</p>}
             {error && <p className="mt-4 text-red-600">{error}</p>}
+
+            {/* Sample PDF download */}
+            <div className="mt-8 pt-6 border-t border-gray-200">
+              <p className="text-sm text-gray-500 mb-3">Don't have a stamped plan handy? Try it with our sample PDF.</p>
+              <a
+                href="https://drive.google.com/uc?export=download&id=1-9d9ab74uhresfDt6f3-1di8JURoxIT0"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-full text-sm font-semibold hover:bg-green-700 transition shadow-sm"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                </svg>
+                Download Sample PDF
+              </a>
+            </div>
           </div>
         )}
 
